@@ -10,14 +10,31 @@ from retry_requests import retry
 from sklearn.base import BaseEstimator, TransformerMixin
 
 def weather_api_response(city_name):
-    '''Getting data from weather API'''
+    """
+        API call to get data for model prediction
+        -----------------------------------------
+        Returns pandas.DataFrame
+    """
 
     city_details = {
-            "Chennai" : [13.08, 80.27],
-            "Mayiladuthurai" : [11.10, 79.65],
-            "Thoothukudi" : [8.76, 78.13],
-            "Nagercoil" : [8.18, 77.41]
-        }
+        "Chennai" : [13.08, 80.27],
+        "Mayiladuthurai" : [11.10, 79.65],
+        "Thoothukudi" : [8.76, 78.13],
+        "Nagercoil" : [8.18, 77.41],
+        "Thiruvananthapuram": [8.53, 76.94],
+        "Kollam": [8.89, 76.61],
+        "Kochi": [9.95, 76.26],
+        "Kozhikode": [11.26, 75.77],
+        "Kannur": [11.87, 75.37],
+        "Visakhapatnam": [17.69, 83.23],
+        "Nellore": [14.44, 79.98],
+        "Mangaluru": [13.01, 74.92],
+        "Udupi": [13.34, 74.74],
+        "Mumbai": [19.09, 72.84],
+        "Daman": [20.40, 72.83],
+        "Alappuzha": [9.50, 76.34],
+        "Kakinada": [16.98, 82.25]
+    }
     try:
         cache_session = requests_cache.CachedSession('.cache', expire_after = -1)
         retry_session = retry(cache_session, retries = 5, backoff_factor = 0.2)
@@ -32,14 +49,15 @@ def weather_api_response(city_name):
 
     url = "https://archive-api.open-meteo.com/v1/archive"
     date_three_days_ago = datetime.today() - timedelta(days=3)
+    date_eight_days_ago = datetime.today() - timedelta(days=8)
     params = {
         "latitude": city_lat,
         "longitude": city_long,
-        "start_date": date_three_days_ago.strftime('%Y-%m-%d'),
+        "start_date": date_eight_days_ago.strftime('%Y-%m-%d'),
         "end_date": date_three_days_ago.strftime('%Y-%m-%d'),
-        "daily": ["temperature_2m_max", "temperature_2m_min","rain_sum", "precipitation_hours",
+        "daily": ["temperature_2m_max", "temperature_2m_min","temperature_2m_mean","rain_sum", "precipitation_hours",
                   "wind_speed_10m_max", "wind_gusts_10m_max", "wind_direction_10m_dominant", "et0_fao_evapotranspiration"],
-        "timezone": "GMT"
+        "timezone": "Asia/Kolkata"
     }
     try:
         responses = openmeteo.weather_api(url, params=params)
@@ -48,28 +66,39 @@ def weather_api_response(city_name):
 
     response = responses[0]
     daily = response.Daily()
-    daily_data = {"date": date_three_days_ago.strftime('%Y-%m-%d'),
-                  "city_name" : city_name
-                  }
+    daily_data = {"date": pd.date_range(
+                            start = pd.to_datetime(daily.Time(), unit = "s"),
+                            end = pd.to_datetime(daily.TimeEnd(), unit = "s"),
+                            freq = pd.Timedelta(seconds = daily.Interval()),
+                            inclusive = "left"
+                        ).strftime('%Y-%m-%d'),
+                "city_name" : city_name
+                }
+
     daily_data["temperature_2m_max"] = daily.Variables(0).ValuesAsNumpy()
     daily_data["temperature_2m_min"] = daily.Variables(1).ValuesAsNumpy()
-    daily_data["rain_sum"] = daily.Variables(2).ValuesAsNumpy()
-    daily_data["precipitation_hours"] = daily.Variables(3).ValuesAsNumpy()
-    daily_data["wind_speed_10m_max"] = daily.Variables(4).ValuesAsNumpy()
-    daily_data["wind_gusts_10m_max"] = daily.Variables(5).ValuesAsNumpy()
-    daily_data["wind_direction_10m_dominant"] = daily.Variables(6).ValuesAsNumpy()
-    daily_data["et0_fao_evapotranspiration"] = daily.Variables(7).ValuesAsNumpy()
+    daily_data["temperature_2m_mean"] = daily.Variables(2).ValuesAsNumpy()
+    daily_data["rain_sum"] = daily.Variables(3).ValuesAsNumpy()
+    daily_data["precipitation_hours"] = daily.Variables(4).ValuesAsNumpy()
+    daily_data["wind_speed_10m_max"] = daily.Variables(5).ValuesAsNumpy()
+    daily_data["wind_gusts_10m_max"] = daily.Variables(6).ValuesAsNumpy()
+    daily_data["wind_direction_10m_dominant"] = daily.Variables(7).ValuesAsNumpy()
+    daily_data["et0_fao_evapotranspiration"] = daily.Variables(8).ValuesAsNumpy()
+
     daily_df = pd.DataFrame(data = daily_data)
 
     return daily_df
 
 def date_encoder(df):
-    '''Date Encoder---works for now'''
+    """
+        Categorical Encoding of data using cyclical encoding
+        -----------------------------------------
+        Returns pandas.DataFrame
+    """
 
     df_encode = df.copy()
-    for i in df_encode['day_of_year']:
-        df_encode['day_of_year_sin'] = np.sin(2 * np.pi * i / 366)
-        df_encode['day_of_year_cos'] = np.cos(2 * np.pi * i / 366)
+    df_encode['day_of_year_sin'] = np.sin(2 * np.pi * df_encode['day_of_year'] / 366)
+    df_encode['day_of_year_cos'] = np.cos(2 * np.pi * df_encode['day_of_year'] / 366)
     df = pd.concat([df['city_name'], df_encode[['day_of_year_sin','day_of_year_cos']],
                 df[['temperature_2m_max','temperature_2m_min',
                 'rain_sum','precipitation_hours','wind_speed_10m_max','wind_gusts_10m_max',
@@ -77,15 +106,20 @@ def date_encoder(df):
     return df
 
 def model_prediction(city_name):
-    '''Model Prediction---shit model-shit data-shit processing'''
+    """
+        Loads trained models and preprocesses data before model prediction
+        -----------------------------------------
+        Returns boolean
+    """
 
-    predict_df = weather_api_response(city_name)
-
+    df = weather_api_response(city_name)
+    predict_df = pd.DataFrame([df.iloc[-1].copy()], columns=df.columns)
+    #predict_df = df.iloc[-1, :].copy().to_frame()
     ####Loading Model
     try:
-        standard_scaler = joblib.load("D:\Final Project\Model-API\MLmodel\StandardScaler_1.pkl")
-        city_encoder = joblib.load("D:\Final Project\Model-API\MLmodel\CityLabelEncoder_1.pkl")
-        model = joblib.load("D:\Final Project\Model-API\MLmodel\MLR_1.pkl")
+        standard_scaler = joblib.load("MLmodel\StandardScaler_2.pkl")
+        city_encoder = joblib.load("MLmodel\CityEncoder_2.pkl")
+        model = joblib.load("MLmodel\MLR_2.pkl")
     except:
         print("Error unpickling models")
     ####Encoding Date
@@ -119,4 +153,7 @@ def model_prediction(city_name):
     except:
         print("Error predicting")
 
-    return prediction[0]
+    for i in df['rain_sum']:
+        if i < 8:
+            return False
+    return True

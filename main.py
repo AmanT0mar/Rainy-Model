@@ -6,7 +6,7 @@ app = FastAPI()
 @app.get("/city_list")
 def read_model():
     return {"statusCode" : 200,
-            "city_list" : ["Chennai", "Mayiladuthurai", "Nagercoil", "Thoothukudi"]}
+            "city_list" : ["Chennai","Mayiladuthurai","Thoothukudi","Nagercoil","Thiruvananthapuram","Kollam","Kochi","Kozhikode","Kannur","Visakhapatnam","Nellore","Mangaluru","Udupi","Mumbai","Daman","Alappuzha","Kakinada"]}
 
 @app.get("/rainfall/{city_name}")
 def city_data(city_name):
