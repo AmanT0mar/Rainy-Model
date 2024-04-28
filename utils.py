@@ -1,15 +1,26 @@
 import joblib
-from sklearn.preprocessing import StandardScaler
+from sklearn.preprocessing import MinMaxScaler
 from sklearn.linear_model import LinearRegression
 import pandas as pd
+import torch
+from torch import nn
+from torch.utils.data import DataLoader, Dataset
 import numpy as np
 from datetime import datetime, timedelta
+from pathlib import Path
 import openmeteo_requests
 import requests_cache
 from retry_requests import retry
 from sklearn.base import BaseEstimator, TransformerMixin
+from model_builder import LSTMModel
+from data_setup import split_dataframe, create_lag_dataframe
+from copy import deepcopy
+import warnings
+warnings.filterwarnings('ignore')
 
-def weather_api_response(city_name):
+device = 'cpu'
+
+def weather_api_response(city_name: str):
     """
         API call to get data for model prediction
         -----------------------------------------
@@ -48,15 +59,14 @@ def weather_api_response(city_name):
         print("City prediction not available")
 
     url = "https://archive-api.open-meteo.com/v1/archive"
-    date_three_days_ago = datetime.today() - timedelta(days=3)
-    date_eight_days_ago = datetime.today() - timedelta(days=8)
+    current_date = datetime.today() - timedelta(days=3)
+    lookback_date = datetime.today() - timedelta(days=62)
     params = {
         "latitude": city_lat,
         "longitude": city_long,
-        "start_date": date_eight_days_ago.strftime('%Y-%m-%d'),
-        "end_date": date_three_days_ago.strftime('%Y-%m-%d'),
-        "daily": ["temperature_2m_max", "temperature_2m_min","temperature_2m_mean","rain_sum", "precipitation_hours",
-                  "wind_speed_10m_max", "wind_gusts_10m_max", "wind_direction_10m_dominant", "et0_fao_evapotranspiration"],
+        "start_date": lookback_date.strftime('%Y-%m-%d'),
+        "end_date": current_date.strftime('%Y-%m-%d'),
+        "daily": ["precipitation_sum"],
         "timezone": "Asia/Kolkata"
     }
     try:
@@ -75,37 +85,73 @@ def weather_api_response(city_name):
                 "city_name" : city_name
                 }
 
-    daily_data["temperature_2m_max"] = daily.Variables(0).ValuesAsNumpy()
-    daily_data["temperature_2m_min"] = daily.Variables(1).ValuesAsNumpy()
-    daily_data["temperature_2m_mean"] = daily.Variables(2).ValuesAsNumpy()
-    daily_data["rain_sum"] = daily.Variables(3).ValuesAsNumpy()
-    daily_data["precipitation_hours"] = daily.Variables(4).ValuesAsNumpy()
-    daily_data["wind_speed_10m_max"] = daily.Variables(5).ValuesAsNumpy()
-    daily_data["wind_gusts_10m_max"] = daily.Variables(6).ValuesAsNumpy()
-    daily_data["wind_direction_10m_dominant"] = daily.Variables(7).ValuesAsNumpy()
-    daily_data["et0_fao_evapotranspiration"] = daily.Variables(8).ValuesAsNumpy()
+    daily_data["precipitation_sum"] = daily.Variables(0).ValuesAsNumpy()
 
     daily_df = pd.DataFrame(data = daily_data)
 
     return daily_df
 
-def date_encoder(df):
-    """
-        Categorical Encoding of data using cyclical encoding
-        -----------------------------------------
-        Returns pandas.DataFrame
-    """
 
-    df_encode = df.copy()
-    df_encode['day_of_year_sin'] = np.sin(2 * np.pi * df_encode['day_of_year'] / 366)
-    df_encode['day_of_year_cos'] = np.cos(2 * np.pi * df_encode['day_of_year'] / 366)
-    df = pd.concat([df['city_name'], df_encode[['day_of_year_sin','day_of_year_cos']],
-                df[['temperature_2m_max','temperature_2m_min',
-                'rain_sum','precipitation_hours','wind_speed_10m_max','wind_gusts_10m_max',
-                'wind_direction_10m_dominant','et0_fao_evapotranspiration']]], axis=1)
-    return df
+def load_model(city: str):
 
-def model_prediction(city_name):
+    model_path = Path("models")
+
+    model_name = f"{city}_model.pth"
+
+    model_save_path = model_path / model_name
+
+    model_state_dict = torch.load(f=model_save_path)
+
+    model = LSTMModel(input_size=1, hidden_size=8, num_layers=2, output_size=1)
+
+    model.load_state_dict(model_state_dict)
+
+    return model
+
+
+
+def model_prediction(model: nn.Module, date_diff: int, X: torch.Tensor, df: pd.DataFrame, scaler: MinMaxScaler):
+
+    prediction = model(X.to(device))
+
+    date = datetime.now() - timedelta(days=3) + timedelta(days=date_diff)
+
+    df.loc[len(df)] = [date, scaler.inverse_transform([[prediction.item()]])[0][0]]
+
+    X_new = torch.cat((X[:, 1:].to(device), prediction.unsqueeze(0).to(device)), dim=1)
+
+    return df, X_new
+
+
+def daily_prediction(model: nn.Module, date: datetime, city: str, scaler: MinMaxScaler) -> pd.DataFrame:
+
+    rainfall_df = pd.DataFrame(data=None, columns=['date', 'precipitation_sum'])
+
+    df = weather_api_response(city_name=city)
+
+    current_date = datetime.now() - timedelta(days=3)
+
+    date_diff = (date - current_date).days + 1
+
+    city_weather_df = split_dataframe(df=df, city_name=city)
+
+    city_lag_df = create_lag_dataframe(df=city_weather_df, scaler=scaler, n_steps=59)
+
+    df_as_np = city_lag_df.to_numpy()
+
+    X = deepcopy(np.flip(df_as_np, axis=1))
+
+    X = X.reshape((-1, 60, 1))
+    X = torch.tensor(X, dtype=torch.float)
+
+    for i in range(1, date_diff+1):
+
+        rainfall_df, X = model_prediction(model=model, date_diff=i, X=X, df=rainfall_df, scaler=scaler)
+
+    return rainfall_df
+
+
+def prediction(city_name: str, date: str):
     """
         Loads trained models and preprocesses data before model prediction
         -----------------------------------------
@@ -117,43 +163,40 @@ def model_prediction(city_name):
     #predict_df = df.iloc[-1, :].copy().to_frame()
     ####Loading Model
     try:
-        standard_scaler = joblib.load("MLmodel\StandardScaler_2.pkl")
-        city_encoder = joblib.load("MLmodel\CityEncoder_2.pkl")
-        model = joblib.load("MLmodel\MLR_2.pkl")
+        scaler = joblib.load("models\minmaxscaler.pkl")
+        model = load_model(city=city_name)
     except:
-        print("Error unpickling models")
-    ####Encoding Date
+        print("Error unpickling")
+
     try:
-        predict_df['date'] = pd.to_datetime(predict_df['date'], format='%Y-%m-%d')
-        predict_df['day_of_year'] = predict_df['date'].dt.dayofyear
-        predict_df = date_encoder(predict_df)
-    except:
-        print("Error encoding date")
-    ####Encoding City
-    try:
-        predict_df['city_name'] = city_encoder.transform(predict_df['city_name'])
-    except:
-        print("Error encoding cityname")
-    ####Feature Scaling(Standard Scaler)
-    try:
-        numerical_columns = ["city_name","temperature_2m_max", "temperature_2m_min", "rain_sum",
-                        "precipitation_hours", "wind_speed_10m_max", "wind_gusts_10m_max",
-                        "wind_direction_10m_dominant","et0_fao_evapotranspiration"]
-        predict_df[numerical_columns] = standard_scaler.transform(predict_df[numerical_columns])
-    except:
-        print("Error scaling features")
-    ####Rainfall amount prediction
-    predict_df = pd.concat([predict_df[['day_of_year_sin','day_of_year_cos']],
-                        predict_df[["city_name","temperature_2m_max", "temperature_2m_min",
-                         "rain_sum","precipitation_hours", "wind_speed_10m_max",
-                        "wind_gusts_10m_max","wind_direction_10m_dominant","et0_fao_evapotranspiration"]]],
-                        axis=1)
-    try:
-        prediction = model.predict(predict_df)
+        prediction_df = daily_prediction(model=model, date=date, city=city_name, scaler=scaler)
     except:
         print("Error predicting")
 
-    for i in df['rain_sum']:
-        if i < 8:
-            return False
-    return True
+    return prediction_df
+
+def disaster_prediction(city_name: str, date: str) -> dict[str, bool]:
+
+    date = datetime.strptime(date, "%Y-%m-%d")
+    prediction_df = prediction(city_name=city_name, date=date)
+
+    results = {"flood" : False, "drought" : False}
+
+    flood_cnt = 0
+    for i in range(len(prediction_df)):
+        if prediction_df['precipitation_sum'][i] > 10:
+            flood_cnt += 1
+
+    drought_cnt = 0
+    for i in range(len(prediction_df)):
+        if prediction_df['precipitation_sum'][i] < 1:
+            drought_cnt += 1
+
+    if flood_cnt >= len(prediction_df) * 0.8:
+        results['flood'] = True
+
+    if drought_cnt <= len(prediction_df) * 0.9:
+        results['drought'] = True
+
+
+    return results
