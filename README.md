@@ -1,3 +1,13 @@
+---
+title: Rainy
+emoji: 🏆
+colorFrom: blue
+colorTo: indigo
+sdk: docker
+pinned: false
+license: mit
+---
+
 # Rainfall prediction model
 
 ## Getting Started
