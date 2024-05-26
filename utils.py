@@ -11,20 +11,23 @@ from pathlib import Path
 import openmeteo_requests
 import requests_cache
 from retry_requests import retry
+import tensorflow as tf
 from sklearn.base import BaseEstimator, TransformerMixin
-from model_builder import LSTMModel
-from data_setup import split_dataframe, create_lag_dataframe
+from modular.modular.model_builder import LSTMModel
+from modular.modular.data_setup import split_dataframe, create_sequence
 from copy import deepcopy
 import warnings
 warnings.filterwarnings('ignore')
 
 device = 'cpu'
+TF_ENABLE_ONEDNN_OPTS=0
 
-def weather_api_response(city_name: str):
+def weather_api_response(city_name: str) -> pd.DataFrame:
     """
-        API call to get data for model prediction
-        -----------------------------------------
-        Returns pandas.DataFrame
+    API call to get data for model prediction
+
+    Args:
+        city_name: name of city for requesting data
     """
 
     city_details = {
@@ -60,7 +63,7 @@ def weather_api_response(city_name: str):
 
     url = "https://archive-api.open-meteo.com/v1/archive"
     current_date = datetime.today() - timedelta(days=3)
-    lookback_date = datetime.today() - timedelta(days=62)
+    lookback_date = datetime.today() - timedelta(days=182)
     params = {
         "latitude": city_lat,
         "longitude": city_long,
@@ -92,57 +95,84 @@ def weather_api_response(city_name: str):
     return daily_df
 
 
-def load_model(city: str):
+def load_model(city_name: str) -> LSTMModel:
+    """
+    Loads trained model for prediction.
 
-    model_path = Path("models")
+    Args:
+    city_name: name of the city to load particular model.
+    """
 
-    model_name = f"{city}_model.pth"
+    current_dir = Path.cwd()
+
+    model_path = current_dir / "models"
+
+    model_name = f"{city_name}_model.h5"
 
     model_save_path = model_path / model_name
 
-    model_state_dict = torch.load(f=model_save_path)
+    if not model_save_path.exists():
+        raise FileNotFoundError(f"Model file for {city_name} not found at {model_save_path}")
 
-    model = LSTMModel(input_size=1, hidden_size=8, num_layers=2, output_size=1)
-
-    model.load_state_dict(model_state_dict)
+    model = tf.keras.models.load_model(model_save_path)
 
     return model
 
 
 
-def model_prediction(model: nn.Module, date_diff: int, X: torch.Tensor, df: pd.DataFrame, scaler: MinMaxScaler):
+def model_prediction(model: nn.Module, date_diff: int, X: torch.Tensor, df: pd.DataFrame, scaler: MinMaxScaler) -> tuple[pd.DataFrame, torch.Tensor]:
+    """
+    Makes prediction using the given model.
 
-    prediction = model(X.to(device))
+    Args:
+        model: The neural network to use for predictions.
+        date_diff: To calculate the prediction date.
+        X: The input data tensor for prediction.
+        df: The Dataframe to which prediction result will be append.
+        scaler: The scaler object used to unscale prediction result.
+    """
 
-    date = datetime.now() - timedelta(days=3) + timedelta(days=date_diff)
+    predicted_value = model.predict(X)
 
-    df.loc[len(df)] = [date, scaler.inverse_transform([[prediction.item()]])[0][0]]
+    date = datetime.now() + timedelta(days=(date_diff - 3))
 
-    X_new = torch.cat((X[:, 1:].to(device), prediction.unsqueeze(0).to(device)), dim=1)
+    if scaler is not None:
+        df.loc[len(df)] = [date, scaler.inverse_transform([[predicted_value.item()]])[0][0]]
+    else:
+        df.loc[len(df)] = [date, predicted_value.item()]
 
-    return df, X_new
+    X = np.roll(X, -1)
+    X[-1] = predicted_value
+
+    return df, X
 
 
-def daily_prediction(model: nn.Module, date: datetime, city: str, scaler: MinMaxScaler) -> pd.DataFrame:
+def daily_prediction(model: nn.Module, date: datetime, city_name: str, scaler: MinMaxScaler) -> pd.DataFrame:
+    """
+    Predicts daily precipitation till given date for the specified city using a neural network model.
+
+    Args:
+        model: The neural network to use for predictions.
+        date: The date for which precipitation predicition in required.
+        city_name: The name of the city for which predictions are made.
+        scaler: The scaler object used for scaling  input and output data.
+    """
 
     rainfall_df = pd.DataFrame(data=None, columns=['date', 'precipitation_sum'])
 
-    df = weather_api_response(city_name=city)
+    df = weather_api_response(city_name=city_name)
 
     current_date = datetime.now() - timedelta(days=3)
 
     date_diff = (date - current_date).days + 1
 
-    city_weather_df = split_dataframe(df=df, city_name=city)
+    city_weather_df = split_dataframe(df=df, city_name=city_name, scaler=scaler)
 
-    city_lag_df = create_lag_dataframe(df=city_weather_df, scaler=scaler, n_steps=59)
+    X = []
+    for i in range(len(city_weather_df) - 179):
+        X.append(city_weather_df.precipitation_sum.iloc[i:i+180])
 
-    df_as_np = city_lag_df.to_numpy()
-
-    X = deepcopy(np.flip(df_as_np, axis=1))
-
-    X = X.reshape((-1, 60, 1))
-    X = torch.tensor(X, dtype=torch.float)
+    X = np.array(X)
 
     for i in range(1, date_diff+1):
 
@@ -153,50 +183,50 @@ def daily_prediction(model: nn.Module, date: datetime, city: str, scaler: MinMax
 
 def prediction(city_name: str, date: str):
     """
-        Loads trained models and preprocesses data before model prediction
-        -----------------------------------------
-        Returns boolean
+    Loads trained model and preprocesses data before making precipitation predictions for a given city on a specific date.
+
+    Args:
+        city_name: The name of the city for which predictions are made.
+        date: The date till which precipitation predictions is required.
     """
 
-    df = weather_api_response(city_name)
-    predict_df = pd.DataFrame([df.iloc[-1].copy()], columns=df.columns)
-    #predict_df = df.iloc[-1, :].copy().to_frame()
-    ####Loading Model
     try:
-        scaler = joblib.load("models\minmaxscaler.pkl")
-        model = load_model(city=city_name)
+        scaler = joblib.load("models\scaler.pkl")
+        model = load_model(city_name=city_name)
     except:
         print("Error unpickling")
 
     try:
-        prediction_df = daily_prediction(model=model, date=date, city=city_name, scaler=scaler)
+        prediction_df = daily_prediction(model=model, date=date, city_name=city_name, scaler=scaler)
     except:
         print("Error predicting")
 
     return prediction_df
 
+
 def disaster_prediction(city_name: str, date: str) -> dict[str, bool]:
+    """
+    Predicts the likelihood of flood and drought disaster for a given city on a specific date.
+
+    Args:
+        city_name: The name of the city for which predictions are made.
+        date: The date of which disaster prediction is required.
+    """
 
     date = datetime.strptime(date, "%Y-%m-%d")
     prediction_df = prediction(city_name=city_name, date=date)
 
     results = {"flood" : False, "drought" : False}
 
-    flood_cnt = 0
-    for i in range(len(prediction_df)):
-        if prediction_df['precipitation_sum'][i] > 10:
-            flood_cnt += 1
-
-    drought_cnt = 0
-    for i in range(len(prediction_df)):
-        if prediction_df['precipitation_sum'][i] < 1:
-            drought_cnt += 1
+    flood_cnt = sum(prediction_df['precipitation_sum'] > 25)
+    drought_cnt = sum(prediction_df['precipitation_sum'] < 1)
 
     if flood_cnt >= len(prediction_df) * 0.8:
         results['flood'] = True
 
-    if drought_cnt <= len(prediction_df) * 0.9:
-        results['drought'] = True
+    if drought_cnt >= len(prediction_df) * 0.99:
+        results['drought'] = False
 
+    print(prediction_df)
 
     return results
