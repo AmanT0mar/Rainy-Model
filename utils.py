@@ -105,7 +105,7 @@ def load_model(city_name: str) -> LSTMModel:
 
     current_dir = Path.cwd()
 
-    model_path = current_dir / "models"
+    model_path = current_dir / "modular" / "models"
 
     model_name = f"{city_name}_model.h5"
 

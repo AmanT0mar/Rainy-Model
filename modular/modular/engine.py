@@ -39,9 +39,7 @@ def train_step(model: nn.Module, dataloader: DataLoader, loss_fn: nn.Module, opt
     return train_loss
 
 
-def test_step(model: nn.Module, dataloader: DataLoader, loss_fn: nn.Module, optimizer: torch.optim.Optimizer,
-               device: torch.device = 'cpu'):
-    model.eval()
+def test_step(model: nn.Module, dataloader: DataLoader, loss_fn: nn.Module, device: torch.device = 'cpu'):
     """Tests a PyTorch model for a single epoch.
 
     Turns a target PyTorch model to "eval" mode and then performs
@@ -53,6 +51,8 @@ def test_step(model: nn.Module, dataloader: DataLoader, loss_fn: nn.Module, opti
     loss_fn: A PyTorch loss function to calculate loss on the test data.
     device: A target device to compute on (e.g. "cuda" or "cpu").
     """
+
+    model.eval()
 
     test_loss = 0
 

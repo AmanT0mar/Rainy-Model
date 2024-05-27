@@ -6,7 +6,7 @@ import numpy as np
 from sklearn.preprocessing import MinMaxScaler
 from copy import deepcopy
 
-LOOKBACK = 60
+LOOKBACK = 180
 BATCH_SIZE = 32
 
 
@@ -61,7 +61,7 @@ def split_dataframe(df: pd.DataFrame, city_name: str, scaler: MinMaxScaler) -> p
     return city_df
 
 
-def create_sequence(df: pd.DataFrame, sequence_length: int) -> tuple[np.ndarray, np.ndarray]:
+def create_sequence(df: pd.DataFrame, sequence_length: int = LOOKBACK) -> tuple[np.ndarray, np.ndarray]:
     """
         Creates sequences of sequence_length.
     """
