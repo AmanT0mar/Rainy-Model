@@ -191,7 +191,7 @@ def prediction(city_name: str, date: str):
     """
 
     try:
-        scaler = joblib.load("models\scaler.pkl")
+        scaler = joblib.load("models/scaler.pkl")
         model = load_model(city_name=city_name)
     except:
         print("Error unpickling")
@@ -226,7 +226,5 @@ def disaster_prediction(city_name: str, date: str) -> dict[str, bool]:
 
     if drought_cnt >= len(prediction_df) * 0.99:
         results['drought'] = False
-
-    print(prediction_df)
 
     return results
